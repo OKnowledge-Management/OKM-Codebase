@@ -1,0 +1,40 @@
+services:
+  ingestion:
+    build:
+      context: ./ingestion
+      dockerfile: Dockerfile
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - ./ingestion:/app
+    ports:
+      - "8001:8000"
+
+  management:
+    build:
+      context: ./management
+      dockerfile: Dockerfile
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - ./management:/app
+    ports:
+      - "8002:8000"
+
+  notification:
+    build:
+      context: ./notification
+      dockerfile: Dockerfile
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - ./notification:/app
+    ports:
+      - "8003:8000"
+
+  rag:
+    build:
+      context: ./rag
+      dockerfile: Dockerfile
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - ./rag:/app
+    ports:
+      - "8004:8000"
