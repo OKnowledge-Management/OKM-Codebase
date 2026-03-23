@@ -1,13 +1,37 @@
 services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+
   ingestion:
     build:
       context: ./ingestion
       dockerfile: Dockerfile
     command: python manage.py runserver 0.0.0.0:8000
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - WORKERS_INGEST_TASK_NAME=workers.handle_document_ingestion_job
+      - UPLOAD_ROOT=/shared/uploads
     volumes:
       - ./ingestion:/app
+      - shared_uploads:/shared/uploads
     ports:
       - "8001:8000"
+    depends_on:
+      - redis
 
   management:
     build:
@@ -38,3 +62,28 @@ services:
       - ./rag:/app
     ports:
       - "8004:8000"
+
+  workers:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile
+    command: celery -A workers worker --loglevel=info --queues=document_ingestion_jobs,default
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - DJANGO_SETTINGS_MODULE=workers.settings
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - ELASTICSEARCH_INDEX=documents_chunks
+      - GEMINI_EMBEDDING_MODEL=AIzaSyA-F7TWKT0PP0FDodSnr-bWhaH7WiGiYrE
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - UPLOAD_ROOT=/shared/uploads
+    volumes:
+      - ./workers:/app
+      - shared_uploads:/shared/uploads
+    depends_on:
+      - redis
+      - elasticsearch
+
+volumes:
+  esdata:
+  shared_uploads:
