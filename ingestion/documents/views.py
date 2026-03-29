@@ -5,6 +5,7 @@ from pathlib import Path
 
 from django.conf import settings
 from django.shortcuts import get_object_or_404
+from drf_spectacular.utils import extend_schema, OpenApiResponse
 from rest_framework import parsers, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -27,6 +28,26 @@ SUPPORTED_MIME_TYPES = {'application/pdf', *SUPPORTED_IMAGE_MIME_TYPES}
 class UploadDocumentAPIView(APIView):
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
 
+    @extend_schema(
+        summary="Upload Document",
+        description="Upload a document for background ingestion. Supports PDF and various image formats.",
+        request={
+            'multipart/form-data': {
+                'type': 'object',
+                'properties': {
+                    'file': {
+                        'type': 'string',
+                        'format': 'binary'
+                    }
+                },
+                'required': ['file']
+            }
+        },
+        responses={
+            status.HTTP_202_ACCEPTED: UploadAcceptedSerializer,
+            status.HTTP_400_BAD_REQUEST: OpenApiResponse(description='Validation error or unsupported file type'),
+        }
+    )
     def post(self, request):
         upload = request.FILES.get('file')
         if upload is None:
@@ -78,6 +99,14 @@ class UploadDocumentAPIView(APIView):
 
 
 class DocumentStatusAPIView(APIView):
+    @extend_schema(
+        summary="Retrieve Document Status",
+        description="Provides the real-time status and progress of an uploaded document's ingestion task.",
+        responses={
+            status.HTTP_200_OK: UploadedDocumentStatusSerializer,
+            status.HTTP_404_NOT_FOUND: OpenApiResponse(description='Document not found'),
+        }
+    )
     def get(self, request, document_id):
         document = get_object_or_404(UploadedDocument, id=document_id)
         live_status = sync_document_status(document)

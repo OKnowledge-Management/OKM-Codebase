@@ -28,7 +28,7 @@ def enqueue_document(document: UploadedDocument) -> str:
         'mime_type': document.mime_type,
         'original_filename': document.original_filename,
     }
-    task = get_celery_app().send_task(settings.WORKERS_INGEST_TASK_NAME, kwargs={'payload': payload})
+    task = get_celery_app().send_task(settings.WORKERS_INGEST_TASK_NAME, kwargs={'payload': payload}, queue="default")
     return task.id
 
 

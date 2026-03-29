@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'documents',
+    'drf_spectacular',
 ]
 
 MIDDLEWARE = [
@@ -137,4 +138,12 @@ WORKERS_INGEST_TASK_NAME = os.getenv('WORKERS_INGEST_TASK_NAME', 'workers.handle
 
 REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.AllowAny'],
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Ingestion API',
+    'DESCRIPTION': 'API for document ingestion',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
 }
