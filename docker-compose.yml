@@ -1,4 +1,15 @@
 services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-okm_db}
+      - POSTGRES_USER=${POSTGRES_USER:-okm_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-okm_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
   redis:
     image: redis:7-alpine
     ports:
@@ -24,7 +35,12 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - WORKERS_INGEST_TASK_NAME=workers.handle_document_ingestion_job
-      - UPLOAD_ROOT=/shared/uploads
+      - UPLOAD_ROOT=/shared/uploads/
+      - DB_NAME=${POSTGRES_DB:-okm_db}
+      - DB_USER=${POSTGRES_USER:-okm_user}
+      - DB_PASSWORD=${POSTGRES_PASSWORD:-okm_password}
+      - DB_HOST=${POSTGRES_HOST:-postgres}
+      - DB_PORT=${POSTGRES_PORT:-5432}
     volumes:
       - ./ingestion:/app
       - shared_uploads:/shared/uploads
@@ -32,6 +48,7 @@ services:
       - "8001:8000"
     depends_on:
       - redis
+      - postgres
 
   management:
     build:
@@ -74,7 +91,7 @@ services:
       - DJANGO_SETTINGS_MODULE=workers.settings
       - ELASTICSEARCH_URL=http://elasticsearch:9200
       - ELASTICSEARCH_INDEX=documents_chunks
-      - GEMINI_EMBEDDING_MODEL=AIzaSyA-F7TWKT0PP0FDodSnr-bWhaH7WiGiYrE
+      - GEMINI_EMBEDDING_MODEL=${GEMINI_EMBEDDING_MODEL}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - UPLOAD_ROOT=/shared/uploads
     volumes:
@@ -87,3 +104,4 @@ services:
 volumes:
   esdata:
   shared_uploads:
+  pgdata:
