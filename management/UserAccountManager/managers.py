@@ -1,14 +1,30 @@
-'''Defining UserManager class'''
+'''Defining managers: UserManager with inline Profile creation, SoftDeleteManager, AllObjectsManager'''
 from django.contrib.auth.models import BaseUserManager
+from django.db import models
+
+
+class SoftDeleteManager(models.Manager):
+    """Default manager that automatically excludes soft-deleted records."""
+
+    def get_queryset(self):
+        return super().get_queryset().filter(is_deleted=False)
+
+
+class AllObjectsManager(models.Manager):
+    """Manager that returns all records including soft-deleted ones."""
+    pass
 
 
 class UserManager(BaseUserManager):
     '''
-    UserManager that implements
-        create : create the user any user
-        user create : handles necessary check for normal user creation
-        super user create : checks for superuser creation
+    Custom user manager that:
+      - Creates users with hashed passwords
+      - Creates a Profile for each new user inline (no signals)
     '''
+
+    def get_queryset(self):
+        """Exclude soft-deleted users by default."""
+        return super().get_queryset().filter(is_deleted=False)
 
     def create(self, email, password=None, **extra_fields):
         if not email:
@@ -17,26 +33,30 @@ class UserManager(BaseUserManager):
         email = self.normalize_email(email=email)
         user = self.model(email=email, **extra_fields)
         user.set_password(password)
-        user.save()
+        user.save(using=self._db)
+
+        # Create an associated Profile immediately
+        from UserAccountManager.models import Profile
+        Profile.objects.create(user=user)
 
         return user
 
     def create_user(self, email=None, password=None, **extra_fields):
-        extra_fields.setdefault('is_susperuser', False)
+        extra_fields.setdefault('is_superuser', False)
 
         if extra_fields.get('is_superuser') is True:
             raise ValueError('user must have is_superuser False')
 
         return self.create(email, password, **extra_fields)
-    
+
     def create_superuser(self, email=None, password=None, **extra_fields):
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
 
         if extra_fields.get('is_superuser') is False:
             raise ValueError('superuser must have is_superuser True')
-        
+
         if extra_fields.get('is_staff') is not True:
             raise ValueError('superuser must have is_staff True')
-        
+
         return self.create(email, password, **extra_fields)
