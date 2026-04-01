@@ -1,0 +1,7 @@
+Django==6.0.3
+celery[redis]==5.4.0
+elasticsearch==8.14.0
+google-genai==1.11.0
+Pillow==11.2.1
+PyMuPDF==1.25.5
+pytesseract==0.3.13

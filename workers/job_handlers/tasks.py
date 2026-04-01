@@ -1,0 +1,219 @@
+from __future__ import annotations
+
+import io
+import logging
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import fitz
+import pytesseract
+from celery import shared_task
+from elasticsearch import Elasticsearch
+from google import genai
+from PIL import Image
+
+logger = logging.getLogger(__name__)
+
+MIN_PDF_TEXT_CHARS = 120
+DEFAULT_CHUNK_SIZE = 1200
+DEFAULT_CHUNK_OVERLAP = 200
+
+
+def _task_progress(task, status: str, progress: int, stage: str, message: str) -> None:
+    task.update_state(state='PROGRESS', meta={'status': status, 'progress': progress, 'stage': stage, 'message': message})
+
+
+def _extract_pdf_text(pdf_path: Path) -> str:
+    with fitz.open(pdf_path) as document:
+        return '\n'.join((page.get_text('text') or '') for page in document)
+
+
+def _ocr_image_bytes(image_bytes: bytes) -> str:
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        return pytesseract.image_to_string(img)
+
+
+def _ocr_image_file(image_path: Path) -> str:
+    return _ocr_image_bytes(image_path.read_bytes())
+
+
+def _ocr_pdf(pdf_path: Path) -> str:
+    text_blocks: list[str] = []
+    with fitz.open(pdf_path) as document:
+        for page in document:
+            pixmap = page.get_pixmap(dpi=300)
+            image_bytes = pixmap.tobytes('png')
+            text_blocks.append(_ocr_image_bytes(image_bytes))
+    return '\n'.join(text_blocks)
+
+
+def _chunk_text(text: str, chunk_size: int = DEFAULT_CHUNK_SIZE, overlap: int = DEFAULT_CHUNK_OVERLAP) -> list[str]:
+    normalized = ' '.join(text.split())
+    if not normalized:
+        return []
+
+    chunks: list[str] = []
+    start = 0
+    while start < len(normalized):
+        end = min(start + chunk_size, len(normalized))
+        chunks.append(normalized[start:end])
+        if end == len(normalized):
+            break
+        start = max(end - overlap, 0)
+    return chunks
+
+
+def _embedding_values(response: Any) -> list[float]:
+    embeddings = getattr(response, 'embeddings', None)
+    if embeddings and len(embeddings) > 0:
+        values = getattr(embeddings[0], 'values', None)
+        if values is not None:
+            return [float(v) for v in values]
+
+    if isinstance(response, dict):
+        embeddings_data = response.get('embeddings', [])
+        if embeddings_data:
+            values = embeddings_data[0].get('values') or []
+            return [float(v) for v in values]
+
+    raise ValueError('Unable to parse embedding vector from Gemini response.')
+
+
+def _embed_chunks(chunks: list[str]) -> list[list[float]]:
+    api_key = os.getenv('GEMINI_API_KEY')
+    if not api_key:
+        raise RuntimeError('GEMINI_API_KEY is not set.')
+
+    model = os.getenv('GEMINI_EMBEDDING_MODEL', 'text-embedding-004')
+    client = genai.Client(api_key=api_key)
+    vectors: list[list[float]] = []
+
+    for chunk in chunks:
+        response = client.models.embed_content(model=model, contents=chunk)
+        vectors.append(_embedding_values(response))
+
+    return vectors
+
+
+def _ensure_index(es: Elasticsearch, index_name: str, embedding_dims: int) -> None:
+    if es.indices.exists(index=index_name):
+        return
+
+    mappings = {
+        'properties': {
+            'document_id': {'type': 'keyword'},
+            'chunk_id': {'type': 'keyword'},
+            'text': {'type': 'text'},
+            'source_type': {'type': 'keyword'},
+            'filename': {'type': 'keyword'},
+            'created_at': {'type': 'date'},
+            'embedding': {'type': 'dense_vector', 'dims': embedding_dims},
+        }
+    }
+    es.indices.create(index=index_name, mappings=mappings)
+
+
+def _index_document_chunks(
+    *,
+    document_id: str,
+    filename: str,
+    source_type: str,
+    chunks: list[str],
+    vectors: list[list[float]],
+) -> int:
+    if not chunks:
+        return 0
+
+    es_url = os.getenv('ELASTICSEARCH_URL', 'http://elasticsearch:9200')
+    index_name = os.getenv('ELASTICSEARCH_INDEX', 'documents_chunks')
+    es = Elasticsearch(es_url)
+
+    _ensure_index(es, index_name, len(vectors[0]))
+
+    es.delete_by_query(
+        index=index_name,
+        body={'query': {'term': {'document_id': document_id}}},
+        conflicts='proceed',
+        refresh=True,
+    )
+
+    for idx, (chunk, vector) in enumerate(zip(chunks, vectors)):
+        es.index(
+            index=index_name,
+            id=f'{document_id}:{idx}',
+            document={
+                'document_id': document_id,
+                'chunk_id': f'{document_id}:{idx}',
+                'text': chunk,
+                'source_type': source_type,
+                'filename': filename,
+                'embedding': vector,
+                'created_at': datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+    es.indices.refresh(index=index_name)
+    return len(chunks)
+
+
+@shared_task(name='workers.handle_document_ingestion_job', bind=True, autoretry_for=(Exception,), retry_backoff=True, retry_jitter=True, max_retries=3)
+def handle_document_ingestion_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+    document_id = str(payload['document_id'])
+    file_path = Path(payload['file_path'])
+    mime_type = str(payload.get('mime_type', 'application/octet-stream'))
+    original_filename = str(payload.get('original_filename', file_path.name))
+
+    if not file_path.exists():
+        raise FileNotFoundError(f'Uploaded file not found: {file_path}')
+
+    _task_progress(self, 'processing', 10, 'extracting_text', 'Starting text extraction.')
+
+    source_type = 'pdf' if mime_type == 'application/pdf' else 'image'
+    text = ''
+
+    if mime_type == 'application/pdf':
+        text = _extract_pdf_text(file_path)
+        if len(text.strip()) < MIN_PDF_TEXT_CHARS:
+            _task_progress(self, 'processing', 25, 'ocr_fallback', 'Low PDF text quality detected, running OCR fallback.')
+            text = _ocr_pdf(file_path)
+    elif mime_type.startswith('image/'):
+        _task_progress(self, 'processing', 25, 'ocr', 'Running OCR for image upload.')
+        text = _ocr_image_file(file_path)
+    else:
+        raise ValueError(f'Unsupported MIME type: {mime_type}')
+
+    cleaned_text = text.strip()
+    if not cleaned_text:
+        raise ValueError('No extractable text found after extraction/OCR.')
+
+    _task_progress(self, 'processing', 45, 'chunking', 'Chunking extracted text.')
+    chunks = _chunk_text(cleaned_text)
+    if not chunks:
+        raise ValueError('No chunks generated from extracted text.')
+
+    _task_progress(self, 'processing', 65, 'embedding', 'Generating Gemini embeddings.')
+    vectors = _embed_chunks(chunks)
+
+    _task_progress(self, 'processing', 85, 'indexing', 'Indexing chunks into Elasticsearch.')
+    indexed_chunks = _index_document_chunks(
+        document_id=document_id,
+        filename=original_filename,
+        source_type=source_type,
+        chunks=chunks,
+        vectors=vectors,
+    )
+
+    result = {
+        'document_id': document_id,
+        'status': 'completed',
+        'progress': 100,
+        'stage': 'completed',
+        'message': 'Document ingested successfully.',
+        'chunk_count': indexed_chunks,
+        'source_type': source_type,
+    }
+
+    logger.info('Document ingestion completed document_id=%s chunks=%s', document_id, indexed_chunks)
+    return result
